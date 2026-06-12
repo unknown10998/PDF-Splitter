@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
+import { PDFDocument } from 'pdf-lib';
 import JSZip from 'jszip';
 import './App.css';
 
@@ -94,26 +95,16 @@ function RangeTable({ rows, onChange }: { rows: RangeRow[]; onChange: (rows: Ran
 // ─── Download helpers ─────────────────────────────────────────────────────────
 
 async function triggerDownload(url: string, fileName: string) {
-  const res = await fetch(url);
-  const blob = await res.blob();
-  const obj = URL.createObjectURL(blob);
+  // blob URLs can be used directly — no need to re-fetch
+  let obj = url;
+  if (!url.startsWith('blob:')) {
+    const blob = await fetch(url).then(r => r.blob());
+    obj = URL.createObjectURL(blob);
+  }
   const a = document.createElement('a');
   a.href = obj; a.download = fileName;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(obj), 1000);
-}
-
-async function safeJson(res: Response): Promise<any> {
-  const ct = res.headers.get('content-type') ?? '';
-  if (!ct.includes('json')) {
-    const text = await res.text().catch(() => '');
-    throw new Error(
-      res.status === 404
-        ? 'API not found — is the server running?'
-        : `Server returned ${res.status} with a non-JSON response. Is the server running?\n${text.slice(0, 120)}`,
-    );
-  }
-  return res.json();
+  if (!url.startsWith('blob:')) setTimeout(() => URL.revokeObjectURL(obj), 1000);
 }
 
 async function downloadAsZip(downloads: SplitDownload[], zipName: string) {
@@ -129,6 +120,108 @@ async function downloadAsZip(downloads: SplitDownload[], zipName: string) {
   a.download = zipName.endsWith('.zip') ? zipName : `${zipName}.zip`;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(obj), 1000);
+}
+
+// ─── Client-side PDF helpers ──────────────────────────────────────────────────
+
+function pdfBlob(bytes: Uint8Array): Blob {
+  const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  return new Blob([buf], { type: 'application/pdf' });
+}
+
+function parseRanges(raw: string, totalPages: number): [number, number][] {
+  const cleaned = raw.replace(/[()]/g, '');
+  const resolve = (s: string): number => {
+    const t = s.trim();
+    if (t === '#') return totalPages;
+    const n = parseInt(t, 10);
+    if (isNaN(n) || n < 1) throw new Error(`Invalid page "${t}"`);
+    return n;
+  };
+  const ranges: [number, number][] = [];
+  for (const tok of cleaned.split(/[,+]/).map(t => t.trim()).filter(Boolean)) {
+    if (tok.includes('-')) {
+      const [a, b] = tok.split('-', 2);
+      const s = resolve(a), e = resolve(b);
+      if (e < s) throw new Error(`Invalid range "${tok}"`);
+      ranges.push([s, e]);
+    } else {
+      const p = resolve(tok);
+      ranges.push([p, p]);
+    }
+  }
+  if (!ranges.length) throw new Error('No page ranges provided.');
+  return ranges;
+}
+
+async function splitIndividual(file: File, baseName: string): Promise<SplitDownload[]> {
+  const src = await PDFDocument.load(await file.arrayBuffer());
+  const n = src.getPageCount();
+  const pad = Math.max(String(n).length, 3);
+  const results: SplitDownload[] = [];
+  for (let i = 0; i < n; i++) {
+    const doc = await PDFDocument.create();
+    const [pg] = await doc.copyPages(src, [i]);
+    doc.addPage(pg);
+    const blob = pdfBlob(await doc.save());
+    const num = String(i + 1).padStart(pad, '0');
+    results.push({
+      fileName: `${sanitizeName(baseName)}_page_${num}.pdf`,
+      label: `Page ${i + 1}`,
+      url: URL.createObjectURL(blob),
+    });
+  }
+  return results;
+}
+
+async function splitBySplits(file: File, splits: SplitPlan[]): Promise<SplitDownload[]> {
+  const src = await PDFDocument.load(await file.arrayBuffer());
+  const total = src.getPageCount();
+  const results: SplitDownload[] = [];
+  for (const split of splits) {
+    const ranges = parseRanges(split.pages, total);
+    const doc = await PDFDocument.create();
+    for (const [s, e] of ranges) {
+      if (e > total) throw new Error(`Range ${s}-${e} exceeds PDF length (${total} pages).`);
+      const indices = Array.from({ length: e - s + 1 }, (_, k) => s - 1 + k);
+      const copied = await doc.copyPages(src, indices);
+      copied.forEach(p => doc.addPage(p));
+    }
+    const blob = pdfBlob(await doc.save());
+    results.push({ fileName: `${split.name}.pdf`, label: split.label, url: URL.createObjectURL(blob) });
+  }
+  return results;
+}
+
+async function mergeBlobs(toMerge: SplitDownload[]): Promise<SplitDownload> {
+  const merged = await PDFDocument.create();
+  for (const d of toMerge) {
+    const src = await PDFDocument.load(await fetch(d.url).then(r => r.arrayBuffer()));
+    const pages = await merged.copyPages(src, Array.from({ length: src.getPageCount() }, (_, i) => i));
+    pages.forEach(p => merged.addPage(p));
+  }
+  const blob = pdfBlob(await merged.save());
+  return {
+    fileName: `merged_${Date.now()}.pdf`,
+    label: `Merged (${toMerge.length} files)`,
+    url: URL.createObjectURL(blob),
+  };
+}
+
+async function parseScheduleText(file: File): Promise<{ email: string; pages: string }[]> {
+  const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+  let text = '';
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    text += content.items.map((it: any) => it.str ?? '').join(' ') + '\n';
+  }
+  const recipients: { email: string; pages: string }[] = [];
+  for (const line of text.split('\n')) {
+    const m = line.match(/([^\s:,]+@[^\s:,]+)\s*[:|]\s*(.+)/);
+    if (m) recipients.push({ email: m[1].trim(), pages: m[2].trim() });
+  }
+  return recipients;
 }
 
 // ─── PdfPagePreview ───────────────────────────────────────────────────────────
@@ -420,10 +513,10 @@ function EmailDialog({ files, onClose }: { files: SplitDownload[]; onClose: () =
 // ─── SplitTab ────────────────────────────────────────────────────────────────
 
 function SplitTab({
-  pdfFile, pageCount, apiUrl, onBack,
+  pdfFile, pageCount, onBack,
 }: {
   pdfFile: File | null; pageCount: number | null;
-  apiUrl: string; onBack: () => void;
+  onBack: () => void;
 }) {
   const [mode, setMode]             = useState<SplitMode>('individual');
   const [rangeRows, setRangeRows]   = useState<RangeRow[]>([{ name: '', pages: '' }]);
@@ -461,15 +554,11 @@ function SplitTab({
     setScheduleError('');
     setScheduleLoading(true);
     try {
-      const form = new FormData();
-      form.append('schedule', f);
-      const res  = await fetch(`${apiUrl}/api/parse-schedule`, { method: 'POST', body: form });
-      const data = await safeJson(res);
-      if (!res.ok) throw new Error(data.error ?? 'Parse failed');
-      if (Array.isArray(data.recipients) && data.recipients.length) {
-        setScheduleRecipients(data.recipients);
+      const recipients = await parseScheduleText(f);
+      if (recipients.length) {
+        setScheduleRecipients(recipients);
       } else {
-        setScheduleError('No recipients found in that PDF.');
+        setScheduleError('No recipients found. Make sure the PDF has lines like: user@email.com: 1-5');
       }
     } catch (e) {
       setScheduleError(e instanceof Error ? e.message : 'Could not parse schedule.');
@@ -482,34 +571,20 @@ function SplitTab({
     if (!pdfFile) return;
     setSplitLoad(true); setSplitErr(''); setDownloads([]); setSelected(new Set());
     try {
-      const form = new FormData();
-      form.append('pdf', pdfFile);
-
+      let results: SplitDownload[];
       if (mode === 'individual') {
-        form.append('mode', 'individual');
-        form.append('baseName', baseName);
+        results = await splitIndividual(pdfFile, baseName);
       } else {
         const splits: SplitPlan[] =
           mode === 'ranges'
             ? buildRangeSplits(rangeRows, baseName)
             : buildScheduleSplits(scheduleRecipients);
         if (!splits.length) { setSplitErr('Nothing to split.'); return; }
-        form.append('mode', 'splits');
-        form.append('splits', JSON.stringify(splits));
+        results = await splitBySplits(pdfFile, splits);
       }
-
-      const res  = await fetch(`${apiUrl}/api/split-pdfs`, { method: 'POST', body: form });
-      const data = await safeJson(res);
-      if (!res.ok) throw new Error(data.detail ?? data.error ?? 'Split failed.');
-
-      setDownloads(
-        (data.downloads ?? []).map((d: SplitDownload) => ({
-          ...d,
-          url: apiUrl ? `${apiUrl}${d.url}` : d.url,
-        })),
-      );
+      setDownloads(results);
     } catch (e) {
-      setSplitErr(e instanceof Error ? e.message : 'Split service not responding.');
+      setSplitErr(e instanceof Error ? e.message : 'Split failed.');
     } finally {
       setSplitLoad(false);
     }
@@ -534,21 +609,8 @@ function SplitTab({
     if (toMerge.length < 2) return;
     setMergeLoad(true); setSplitErr('');
     try {
-      const res = await fetch(`${apiUrl}/api/merge-pdfs`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileNames: toMerge.map((d) => d.fileName) }),
-      });
-      const data = await safeJson(res);
-      if (!res.ok) throw new Error(data.error ?? 'Merge failed.');
-      setDownloads((prev) => [
-        ...prev,
-        {
-          fileName: data.fileName,
-          label: `Merged (${toMerge.length} files)`,
-          url: apiUrl ? `${apiUrl}${data.url}` : data.url,
-        },
-      ]);
+      const merged = await mergeBlobs(toMerge);
+      setDownloads((prev) => [...prev, merged]);
       setSelected(new Set());
     } catch (e) {
       setSplitErr(e instanceof Error ? e.message : 'Merge failed.');
@@ -905,7 +967,6 @@ export default function App() {
       {activeTab === 'split' && (
         <SplitTab
           pdfFile={pdfFile} pageCount={pageCount}
-          apiUrl={settings.apiUrl}
           onBack={() => setActiveTab('upload')}
         />
       )}
