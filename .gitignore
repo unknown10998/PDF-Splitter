@@ -11,6 +11,10 @@
 # production
 /build
 
+# runtime folders
+/uploads
+/downloads
+
 # misc
 .DS_Store
 .env.local

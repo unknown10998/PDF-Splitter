@@ -7,8 +7,9 @@ import { spawnSync } from 'child_process';
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
-const uploadsDir = path.join(__dirname, '..', 'uploads');
+const uploadsDir   = path.join(__dirname, '..', 'uploads');
 const downloadsDir = path.join(__dirname, '..', 'downloads');
+const pythonDir    = path.join(__dirname, '..', 'python');
 
 const upload = multer({ dest: uploadsDir });
 const python = process.env.PYTHON || 'python';
@@ -22,7 +23,7 @@ app.get('/downloads/:filename', (req: Request, res: Response) => {
   if (!fs.existsSync(filepath)) {
     return res.status(404).json({ error: 'File not found.' });
   }
-  return res.download(filepath, filename);
+  return res.download(filepath, filename, () => { fs.unlink(filepath, () => {}); });
 });
 
 app.get('/health', (_req: Request, res: Response) => {
@@ -42,7 +43,7 @@ app.post('/api/split-pdfs', upload.single('pdf'), (req: Request, res: Response) 
 
     if (mode === 'individual') {
       const baseName = path.basename(String(req.body.baseName || 'page'), '.pdf');
-      pythonArgs = ['python/split_pdf.py', req.file.path, downloadsDir, 'individual', baseName];
+      pythonArgs = [path.join(pythonDir, 'split_pdf.py'), req.file.path, downloadsDir, 'individual', baseName];
     } else {
       let splits: Array<{ name: string; pages: string; label?: string }>;
       try {
@@ -51,10 +52,11 @@ app.post('/api/split-pdfs', upload.single('pdf'), (req: Request, res: Response) 
         return res.status(400).json({ error: 'splits must be valid JSON.' });
       }
       if (!splits.length) return res.status(400).json({ error: 'No splits provided.' });
-      pythonArgs = ['python/split_pdf.py', req.file.path, downloadsDir, 'splits', JSON.stringify(splits)];
+      pythonArgs = [path.join(pythonDir, 'split_pdf.py'), req.file.path, downloadsDir, 'splits', JSON.stringify(splits)];
     }
 
     const result = spawnSync(python, pythonArgs, { encoding: 'utf8' });
+    fs.unlink(req.file.path, () => {});
 
     if (result.status !== 0) {
       return res.status(500).json({
@@ -86,9 +88,10 @@ app.post('/api/parse-schedule', upload.single('schedule'), (req: Request, res: R
 
     const result = spawnSync(
       python,
-      ['python/parse_schedule.py', req.file.path],
+      [path.join(pythonDir, 'parse_schedule.py'), req.file.path],
       { encoding: 'utf8' },
     );
+    fs.unlink(req.file.path, () => {});
 
     if (result.status !== 0) {
       return res.status(500).json({
@@ -130,7 +133,7 @@ app.post('/api/merge-pdfs', (req: Request, res: Response) => {
     const mergedName = `${base}.pdf`;
     const mergedPath = path.join(downloadsDir, mergedName);
 
-    const result = spawnSync(python, ['python/merge_pdfs.py', mergedPath, ...filePaths], { encoding: 'utf8' });
+    const result = spawnSync(python, [path.join(pythonDir, 'merge_pdfs.py'), mergedPath, ...filePaths], { encoding: 'utf8' });
 
     if (result.status !== 0) {
       return res.status(500).json({ error: 'Merge failed.', detail: result.stderr || result.stdout });
