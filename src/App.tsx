@@ -220,83 +220,106 @@ function BatchFillDialog({
   onApply: (rows: RangeRow[]) => void;
   onClose: () => void;
 }) {
-  const [from, setFrom]       = useState('1');
-  const [perGroup, setPerGroup] = useState('1');
-  const [stopAt, setStopAt]   = useState(pageCount ? String(pageCount) : '');
+  const [from,     setFrom]     = useState('1');
+  const [perGroup, setPerGroup] = useState('');
+  const [stopAt,   setStopAt]   = useState(pageCount ? String(pageCount) : '');
 
-  const fromN  = parseInt(from, 10);
-  const perN   = parseInt(perGroup, 10);
-  const stopN  = parseInt(stopAt, 10);
+  const fromN = parseInt(from, 10);
+  const perN  = parseInt(perGroup, 10);
+  const stopN = parseInt(stopAt, 10);
 
-  const isValid =
+  const inputsValid =
     !isNaN(fromN) && !isNaN(perN) && !isNaN(stopN) &&
     fromN >= 1 && perN >= 1 && stopN >= fromN;
 
+  const totalPages  = inputsValid ? stopN - fromN + 1 : 0;
+  const fullGroups  = inputsValid ? Math.floor(totalPages / perN) : 0;
+  const remainder   = inputsValid ? totalPages % perN : 0;
+  const groupCount  = inputsValid ? fullGroups + (remainder > 0 ? 1 : 0) : 0;
+  const isPossible  = inputsValid && groupCount > 0;
+  const isEven      = inputsValid && remainder === 0;
+
   const generated: RangeRow[] = [];
-  if (isValid) {
+  if (isPossible) {
     let cur = fromN;
     while (cur <= stopN) {
       const end = Math.min(cur + perN - 1, stopN);
-      generated.push({ name: '', pages: `${cur}-${end}` });
+      generated.push({ name: '', pages: cur === end ? `${cur}` : `${cur}-${end}` });
       cur = end + 1;
     }
   }
 
-  const showErr = !isValid && from !== '' && perGroup !== '' && stopAt !== '';
+  const showInputErr = !inputsValid && from !== '' && perGroup !== '' && stopAt !== '';
 
   return (
     <div className="dlg-overlay" onClick={onClose}>
       <div className="dlg dlg-wide" onClick={(e) => e.stopPropagation()}>
-        <h3 className="dlg-title">Auto-fill Ranges</h3>
+        <h3 className="dlg-title">Automate per page</h3>
         <p className="dlg-desc">
-          Group pages into equal-sized chunks and auto-fill the range table.
+          Select a page range and how many pages go into each split PDF.
+          The app will check if the split is possible and fill in the rows.
         </p>
+
         <div className="batch-fill-fields">
           <div className="batch-field">
-            <label className="dlg-label">From page</label>
+            <label className="dlg-label">Beginning page</label>
             <input
               className="field-input" type="number" min="1" autoFocus
+              placeholder="1"
               value={from} onChange={(e) => setFrom(e.target.value)}
             />
           </div>
           <div className="batch-field">
-            <label className="dlg-label">Pages per group</label>
-            <input
-              className="field-input" type="number" min="1"
-              value={perGroup} onChange={(e) => setPerGroup(e.target.value)}
-            />
-          </div>
-          <div className="batch-field">
             <label className="dlg-label">
-              Stop at page{pageCount ? ` (${pageCount} total)` : ''}
+              End page{pageCount ? ` (max ${pageCount})` : ''}
             </label>
             <input
               className="field-input" type="number" min="1"
+              placeholder={pageCount ? String(pageCount) : ''}
               value={stopAt} onChange={(e) => setStopAt(e.target.value)}
             />
           </div>
+          <div className="batch-field">
+            <label className="dlg-label">Pages per split PDF</label>
+            <input
+              className="field-input" type="number" min="1"
+              placeholder="e.g. 2"
+              value={perGroup} onChange={(e) => setPerGroup(e.target.value)}
+            />
+          </div>
         </div>
-        {isValid && (
-          <p className="batch-preview">
-            Will generate{' '}
-            <strong>{generated.length} row{generated.length !== 1 ? 's' : ''}</strong>:{' '}
-            {generated.slice(0, 4).map((r) => r.pages).join(', ')}
-            {generated.length > 4 ? ', …' : ''}
-          </p>
+
+        {isPossible && (
+          <div className={`batch-feasibility ${isEven ? 'feasibility-ok' : 'feasibility-warn'}`}>
+            <span className="feasibility-icon">{isEven ? '✓' : '⚠'}</span>
+            <div>
+              <strong>
+                {isEven
+                  ? `Splits evenly into ${groupCount} PDF${groupCount !== 1 ? 's' : ''}`
+                  : `${fullGroups} full PDF${fullGroups !== 1 ? 's' : ''} + 1 partial PDF (${remainder} page${remainder !== 1 ? 's' : ''})`}
+              </strong>
+              <div className="feasibility-preview">
+                {generated.slice(0, 4).map((r) => r.pages).join(', ')}
+                {generated.length > 4 ? `, … (${generated.length} total)` : ''}
+              </div>
+            </div>
+          </div>
         )}
-        {showErr && (
+
+        {showInputErr && (
           <p className="batch-preview batch-preview-err">
-            "Stop at" must be ≥ "From page" and all values must be positive integers.
+            End page must be ≥ beginning page and all values must be positive integers.
           </p>
         )}
+
         <div className="dlg-actions">
           <button className="btn btn-ghost btn-sm" type="button" onClick={onClose}>Cancel</button>
           <button
             className="btn btn-primary btn-sm" type="button"
-            disabled={!isValid}
+            disabled={!isPossible}
             onClick={() => { onApply(generated); onClose(); }}
           >
-            Apply{isValid ? ` ${generated.length} rows` : ''}
+            Apply {isPossible ? `${generated.length} rows` : ''}
           </button>
         </div>
       </div>
@@ -577,7 +600,7 @@ function SplitTab({
           <div className="sect-header">
             <span className="sect-label" style={{ marginBottom: 0 }}>Page ranges</span>
             <button className="btn btn-ghost btn-sm" type="button" onClick={() => setShowBatchFill(true)}>
-              ⚡ Auto-fill
+              Automate per page
             </button>
           </div>
           <p className="sect-desc">
