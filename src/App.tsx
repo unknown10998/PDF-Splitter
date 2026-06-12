@@ -103,6 +103,19 @@ async function triggerDownload(url: string, fileName: string) {
   setTimeout(() => URL.revokeObjectURL(obj), 1000);
 }
 
+async function safeJson(res: Response): Promise<any> {
+  const ct = res.headers.get('content-type') ?? '';
+  if (!ct.includes('json')) {
+    const text = await res.text().catch(() => '');
+    throw new Error(
+      res.status === 404
+        ? 'API not found — is the server running?'
+        : `Server returned ${res.status} with a non-JSON response. Is the server running?\n${text.slice(0, 120)}`,
+    );
+  }
+  return res.json();
+}
+
 async function downloadAsZip(downloads: SplitDownload[], zipName: string) {
   const zip = new JSZip();
   for (const d of downloads) {
@@ -141,7 +154,7 @@ function PdfPagePreview({ file, onPageCount }: { file: File; onPageCount: (n: nu
         canvas.width = vp.width; canvas.height = vp.height;
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
-        await page.render({ canvasContext: ctx, viewport: vp, canvas }).promise;
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
       } catch { if (!cancelled) setErr('Preview unavailable.'); }
     })();
     return () => { cancelled = true; };
@@ -193,6 +206,101 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
       <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
       <span className="toggle-track" />
     </label>
+  );
+}
+
+// ─── BatchFillDialog ─────────────────────────────────────────────────────────
+
+function BatchFillDialog({
+  pageCount,
+  onApply,
+  onClose,
+}: {
+  pageCount: number | null;
+  onApply: (rows: RangeRow[]) => void;
+  onClose: () => void;
+}) {
+  const [from, setFrom]       = useState('1');
+  const [perGroup, setPerGroup] = useState('1');
+  const [stopAt, setStopAt]   = useState(pageCount ? String(pageCount) : '');
+
+  const fromN  = parseInt(from, 10);
+  const perN   = parseInt(perGroup, 10);
+  const stopN  = parseInt(stopAt, 10);
+
+  const isValid =
+    !isNaN(fromN) && !isNaN(perN) && !isNaN(stopN) &&
+    fromN >= 1 && perN >= 1 && stopN >= fromN;
+
+  const generated: RangeRow[] = [];
+  if (isValid) {
+    let cur = fromN;
+    while (cur <= stopN) {
+      const end = Math.min(cur + perN - 1, stopN);
+      generated.push({ name: '', pages: `${cur}-${end}` });
+      cur = end + 1;
+    }
+  }
+
+  const showErr = !isValid && from !== '' && perGroup !== '' && stopAt !== '';
+
+  return (
+    <div className="dlg-overlay" onClick={onClose}>
+      <div className="dlg dlg-wide" onClick={(e) => e.stopPropagation()}>
+        <h3 className="dlg-title">Auto-fill Ranges</h3>
+        <p className="dlg-desc">
+          Group pages into equal-sized chunks and auto-fill the range table.
+        </p>
+        <div className="batch-fill-fields">
+          <div className="batch-field">
+            <label className="dlg-label">From page</label>
+            <input
+              className="field-input" type="number" min="1" autoFocus
+              value={from} onChange={(e) => setFrom(e.target.value)}
+            />
+          </div>
+          <div className="batch-field">
+            <label className="dlg-label">Pages per group</label>
+            <input
+              className="field-input" type="number" min="1"
+              value={perGroup} onChange={(e) => setPerGroup(e.target.value)}
+            />
+          </div>
+          <div className="batch-field">
+            <label className="dlg-label">
+              Stop at page{pageCount ? ` (${pageCount} total)` : ''}
+            </label>
+            <input
+              className="field-input" type="number" min="1"
+              value={stopAt} onChange={(e) => setStopAt(e.target.value)}
+            />
+          </div>
+        </div>
+        {isValid && (
+          <p className="batch-preview">
+            Will generate{' '}
+            <strong>{generated.length} row{generated.length !== 1 ? 's' : ''}</strong>:{' '}
+            {generated.slice(0, 4).map((r) => r.pages).join(', ')}
+            {generated.length > 4 ? ', …' : ''}
+          </p>
+        )}
+        {showErr && (
+          <p className="batch-preview batch-preview-err">
+            "Stop at" must be ≥ "From page" and all values must be positive integers.
+          </p>
+        )}
+        <div className="dlg-actions">
+          <button className="btn btn-ghost btn-sm" type="button" onClick={onClose}>Cancel</button>
+          <button
+            className="btn btn-primary btn-sm" type="button"
+            disabled={!isValid}
+            onClick={() => { onApply(generated); onClose(); }}
+          >
+            Apply{isValid ? ` ${generated.length} rows` : ''}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -295,7 +403,8 @@ function SplitTab({
   apiUrl: string; onBack: () => void;
 }) {
   const [mode, setMode]             = useState<SplitMode>('individual');
-  const [rangeRows, setRangeRows] = useState<RangeRow[]>([{ name: '', pages: '' }]);
+  const [rangeRows, setRangeRows]   = useState<RangeRow[]>([{ name: '', pages: '' }]);
+  const [showBatchFill, setShowBatchFill] = useState(false);
 
   // schedule sub-state
   const [scheduleFile,       setScheduleFile]       = useState<File | null>(null);
@@ -332,7 +441,7 @@ function SplitTab({
       const form = new FormData();
       form.append('schedule', f);
       const res  = await fetch(`${apiUrl}/api/parse-schedule`, { method: 'POST', body: form });
-      const data = await res.json();
+      const data = await safeJson(res);
       if (!res.ok) throw new Error(data.error ?? 'Parse failed');
       if (Array.isArray(data.recipients) && data.recipients.length) {
         setScheduleRecipients(data.recipients);
@@ -367,7 +476,7 @@ function SplitTab({
       }
 
       const res  = await fetch(`${apiUrl}/api/split-pdfs`, { method: 'POST', body: form });
-      const data = await res.json();
+      const data = await safeJson(res);
       if (!res.ok) throw new Error(data.detail ?? data.error ?? 'Split failed.');
 
       setDownloads(
@@ -407,7 +516,7 @@ function SplitTab({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ fileNames: toMerge.map((d) => d.fileName) }),
       });
-      const data = await res.json();
+      const data = await safeJson(res);
       if (!res.ok) throw new Error(data.error ?? 'Merge failed.');
       setDownloads((prev) => [
         ...prev,
@@ -465,7 +574,12 @@ function SplitTab({
 
       {mode === 'ranges' && (
         <div className="glass-card">
-          <span className="sect-label">Page ranges</span>
+          <div className="sect-header">
+            <span className="sect-label" style={{ marginBottom: 0 }}>Page ranges</span>
+            <button className="btn btn-ghost btn-sm" type="button" onClick={() => setShowBatchFill(true)}>
+              ⚡ Auto-fill
+            </button>
+          </div>
           <p className="sect-desc">
             Each row = one output PDF. Use <code style={{ color: '#67e8f9' }}>-</code> for ranges,{' '}
             <code style={{ color: '#67e8f9' }}>,</code> or <code style={{ color: '#67e8f9' }}>+</code> to combine,{' '}
@@ -631,6 +745,15 @@ function SplitTab({
 
       {/* ── Email dialog ── */}
       {emailDlg && <EmailDialog files={emailDlg} onClose={() => setEmailDlg(null)} />}
+
+      {/* ── Batch fill dialog ── */}
+      {showBatchFill && (
+        <BatchFillDialog
+          pageCount={pageCount}
+          onApply={(rows) => { setRangeRows(rows); setDownloads([]); }}
+          onClose={() => setShowBatchFill(false)}
+        />
+      )}
 
       <div className="row-btns">
         <button className="btn btn-ghost" type="button" onClick={onBack}>← Back</button>
