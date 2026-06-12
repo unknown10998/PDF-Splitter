@@ -317,6 +317,8 @@ function BatchFillDialog({
   const [perGroup, setPerGroup] = useState('');
   const [stopAt,   setStopAt]   = useState(pageCount ? String(pageCount) : '');
   const [names,    setNames]    = useState('');
+  const [prefix,   setPrefix]   = useState('');
+  const [suffix,   setSuffix]   = useState('');
 
   const fromN = parseInt(from, 10);
   const perN  = parseInt(perGroup, 10);
@@ -342,12 +344,16 @@ function BatchFillDialog({
       const end = Math.min(cur + perN - 1, stopN);
       const idx = generated.length;
       generated.push({
-        name:  nameLines[idx] ?? '',
+        name:  `${prefix}${nameLines[idx] ?? ''}${suffix}`,
         pages: cur === end ? `${cur}` : `${cur}-${end}`,
       });
       cur = end + 1;
     }
   }
+
+  const previewName = isPossible && (prefix || suffix || nameLines[0])
+    ? `${prefix}${nameLines[0] || ''}${suffix}`
+    : null;
 
   const showInputErr = !inputsValid && from !== '' && perGroup !== '' && stopAt !== '';
 
@@ -431,6 +437,38 @@ function BatchFillDialog({
             rows={Math.min(Math.max(generated.length, 3), 8)}
           />
         </div>
+
+        <div className="batch-fill-fields" style={{ gridTemplateColumns: '1fr 1fr' }}>
+          <div className="batch-field">
+            <label className="dlg-label">Prefix</label>
+            <input
+              className="field-input" type="text"
+              placeholder="e.g. Report_"
+              value={prefix} onChange={(e) => setPrefix(e.target.value)}
+            />
+          </div>
+          <div className="batch-field">
+            <label className="dlg-label">Suffix</label>
+            <input
+              className="field-input" type="text"
+              placeholder="e.g. _2024"
+              value={suffix} onChange={(e) => setSuffix(e.target.value)}
+            />
+          </div>
+        </div>
+
+        {previewName !== null && (
+          <p className="batch-preview">
+            Preview: <strong>{previewName || <em style={{ opacity: .5 }}>unnamed</em>}</strong>
+            {generated.length > 1 && (
+              <span style={{ color: '#475569' }}>
+                {', '}
+                <strong>{`${prefix}${nameLines[1] ?? ''}${suffix}` || <em style={{ opacity: .5 }}>unnamed</em>}</strong>
+                {generated.length > 2 ? ', …' : ''}
+              </span>
+            )}
+          </p>
+        )}
 
         <div className="dlg-actions">
           <button className="btn btn-ghost btn-sm" type="button" onClick={onClose}>Cancel</button>
