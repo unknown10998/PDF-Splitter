@@ -316,6 +316,7 @@ function BatchFillDialog({
   const [from,     setFrom]     = useState('1');
   const [perGroup, setPerGroup] = useState('');
   const [stopAt,   setStopAt]   = useState(pageCount ? String(pageCount) : '');
+  const [names,    setNames]    = useState('');
 
   const fromN = parseInt(from, 10);
   const perN  = parseInt(perGroup, 10);
@@ -332,12 +333,18 @@ function BatchFillDialog({
   const isPossible  = inputsValid && groupCount > 0;
   const isEven      = inputsValid && remainder === 0;
 
+  const nameLines = names.split('\n').map(s => s.trim());
+
   const generated: RangeRow[] = [];
   if (isPossible) {
     let cur = fromN;
     while (cur <= stopN) {
       const end = Math.min(cur + perN - 1, stopN);
-      generated.push({ name: '', pages: cur === end ? `${cur}` : `${cur}-${end}` });
+      const idx = generated.length;
+      generated.push({
+        name:  nameLines[idx] ?? '',
+        pages: cur === end ? `${cur}` : `${cur}-${end}`,
+      });
       cur = end + 1;
     }
   }
@@ -404,6 +411,26 @@ function BatchFillDialog({
             End page must be ≥ beginning page and all values must be positive integers.
           </p>
         )}
+
+        <div className="batch-field">
+          <label className="dlg-label">
+            Names (optional) — paste a list, one name per line
+            {isPossible && nameLines.some(Boolean) && (
+              <span style={{ color: '#475569', fontWeight: 400, marginLeft: 8 }}>
+                ({Math.min(nameLines.filter(Boolean).length, generated.length)} of {generated.length} named)
+              </span>
+            )}
+          </label>
+          <textarea
+            className="field-input field-textarea"
+            placeholder={isPossible
+              ? generated.slice(0, 3).map((_, i) => `Name for PDF ${i + 1}`).join('\n') + (generated.length > 3 ? '\n…' : '')
+              : 'Fill in the page range first…'}
+            value={names}
+            onChange={(e) => setNames(e.target.value)}
+            rows={Math.min(Math.max(generated.length, 3), 8)}
+          />
+        </div>
 
         <div className="dlg-actions">
           <button className="btn btn-ghost btn-sm" type="button" onClick={onClose}>Cancel</button>
