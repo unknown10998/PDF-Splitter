@@ -410,7 +410,7 @@ html { font-size: 20px; }
 .range-table { display: flex; flex-direction: column; gap: 8px; }
 
 .range-table-header {
-  display: grid; grid-template-columns: 1fr 1.4fr 38px;
+  display: grid; grid-template-columns: 22px 1fr 1.4fr 38px;
   gap: 10px; padding: 0 4px 4px;
 }
 .range-th {
@@ -420,9 +420,11 @@ html { font-size: 20px; }
 .range-th-opt { font-weight: 400; text-transform: none; letter-spacing: 0; color: #334155; }
 
 .range-table-row {
-  display: grid; grid-template-columns: 1fr 1.4fr 38px;
+  display: grid; grid-template-columns: 22px 1fr 1.4fr 38px;
   gap: 10px; align-items: center;
+  transition: opacity .15s;
 }
+.range-table-row.row-dragging { opacity: .35; }
 
 .btn-icon-remove {
   width: 38px; height: 44px;
@@ -493,3 +495,94 @@ html { font-size: 20px; }
 }
 .recip-preview-email { font-size: .95rem; color: #67e8f9; word-break: break-all; }
 .recip-preview-pages { font-size: .88rem; color: #a78bfa; font-family: monospace; white-space: nowrap; flex-shrink: 0; }
+
+/* ===== DRAG HANDLE ===== */
+.drag-handle {
+  display: flex; align-items: center; justify-content: center;
+  cursor: grab; color: #334155; font-size: 1rem; user-select: none;
+  transition: color .15s; padding: 0 2px;
+}
+.drag-handle:hover { color: #64748b; }
+.drag-handle:active { cursor: grabbing; }
+
+/* ===== PAGE THUMBNAIL STRIP ===== */
+.thumb-strip-wrap { margin-top: 20px; }
+.thumb-strip-label {
+  font-size: .78rem; font-weight: 700; color: #475569;
+  text-transform: uppercase; letter-spacing: .08em;
+  display: block; margin-bottom: 10px;
+}
+.thumb-strip {
+  display: flex; gap: 8px; overflow-x: auto; padding-bottom: 8px;
+}
+.thumb-strip::-webkit-scrollbar { height: 5px; }
+.thumb-strip::-webkit-scrollbar-track { background: rgba(255,255,255,.04); border-radius: 3px; }
+.thumb-strip::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 3px; }
+.thumb-item {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 5px; flex-shrink: 0; cursor: default;
+}
+.thumb-canvas-wrap {
+  width: 60px; height: 80px;
+  background: #0a0f1e;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 6px; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+}
+.thumb-canvas-wrap canvas { width: 100%; height: auto; display: block; }
+.thumb-skeleton {
+  width: 44px; height: 60px;
+  background: rgba(255,255,255,.04);
+  border-radius: 4px; animation: pulse 1.4s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100% { opacity:.5 } 50% { opacity:1 } }
+.thumb-num {
+  font-size: .68rem; color: #475569;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===== SPLIT PREVIEW PANEL ===== */
+.split-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 12px; margin-top: 4px;
+  max-height: 420px; overflow-y: auto; padding-right: 4px;
+}
+.split-preview-card {
+  background: rgba(255,255,255,.03);
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 14px; padding: 10px;
+  display: flex; flex-direction: column; gap: 7px;
+}
+.split-preview-thumb {
+  background: #0a0f1e;
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 8px; overflow: hidden;
+  min-height: 72px;
+  display: flex; align-items: center; justify-content: center;
+}
+.split-preview-thumb canvas { width: 100%; height: auto; display: block; }
+.split-preview-name {
+  font-size: .8rem; font-weight: 600; color: #e2e8f0;
+  word-break: break-all; line-height: 1.3;
+}
+.split-preview-meta {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+}
+.split-preview-pages { font-size: .72rem; color: #67e8f9; font-family: monospace; }
+.split-preview-count { font-size: .72rem; color: #475569; white-space: nowrap; }
+
+/* ===== SPLIT PROGRESS BAR ===== */
+.split-progress-wrap { margin-top: 16px; }
+.split-progress-bar {
+  height: 6px; background: rgba(255,255,255,.06);
+  border-radius: 999px; overflow: hidden;
+}
+.split-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #06b6d4 0%, #a855f7 100%);
+  border-radius: 999px; transition: width .12s ease;
+}
+.split-progress-label {
+  font-size: .82rem; color: #64748b; margin-top: 6px;
+}

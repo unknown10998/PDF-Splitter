@@ -57,21 +57,44 @@ function buildScheduleSplits(recipients: { email: string; pages: string }[]): Sp
 // ─── RangeTable ───────────────────────────────────────────────────────────────
 
 function RangeTable({ rows, onChange }: { rows: RangeRow[]; onChange: (rows: RangeRow[]) => void }) {
+  const [dragSrc, setDragSrc] = useState<number | null>(null);
+
   function update(i: number, field: keyof RangeRow, value: string) {
     onChange(rows.map((r, idx) => (idx === i ? { ...r, [field]: value } : r)));
   }
   function remove(i: number) { onChange(rows.filter((_, idx) => idx !== i)); }
   function add() { onChange([...rows, { name: '', pages: '' }]); }
 
+  function onDragStart(i: number) { setDragSrc(i); }
+  function onDragOver(e: React.DragEvent, i: number) {
+    e.preventDefault();
+    if (dragSrc === null || dragSrc === i) return;
+    const next = [...rows];
+    const [moved] = next.splice(dragSrc, 1);
+    next.splice(i, 0, moved);
+    onChange(next);
+    setDragSrc(i);
+  }
+  function onDragEnd() { setDragSrc(null); }
+
   return (
     <div className="range-table">
       <div className="range-table-header">
+        <span />
         <span className="range-th">Name <span className="range-th-opt">(optional)</span></span>
         <span className="range-th">Pages</span>
         <span />
       </div>
       {rows.map((row, i) => (
-        <div key={i} className="range-table-row">
+        <div
+          key={i}
+          className={`range-table-row${dragSrc === i ? ' row-dragging' : ''}`}
+          draggable
+          onDragStart={() => onDragStart(i)}
+          onDragOver={(e) => onDragOver(e, i)}
+          onDragEnd={onDragEnd}
+        >
+          <span className="drag-handle" title="Drag to reorder">⠿</span>
           <input
             className="field-input"
             placeholder={`part_${i + 1}`}
@@ -154,7 +177,10 @@ function parseRanges(raw: string, totalPages: number): [number, number][] {
   return ranges;
 }
 
-async function splitIndividual(file: File, baseName: string): Promise<SplitDownload[]> {
+async function splitIndividual(
+  file: File, baseName: string,
+  onProgress?: (pct: number) => void,
+): Promise<SplitDownload[]> {
   const src = await PDFDocument.load(await file.arrayBuffer());
   const n = src.getPageCount();
   const pad = Math.max(String(n).length, 3);
@@ -170,15 +196,20 @@ async function splitIndividual(file: File, baseName: string): Promise<SplitDownl
       label: `Page ${i + 1}`,
       url: URL.createObjectURL(blob),
     });
+    onProgress?.((i + 1) / n * 100);
   }
   return results;
 }
 
-async function splitBySplits(file: File, splits: SplitPlan[]): Promise<SplitDownload[]> {
+async function splitBySplits(
+  file: File, splits: SplitPlan[],
+  onProgress?: (pct: number) => void,
+): Promise<SplitDownload[]> {
   const src = await PDFDocument.load(await file.arrayBuffer());
   const total = src.getPageCount();
   const results: SplitDownload[] = [];
-  for (const split of splits) {
+  for (let si = 0; si < splits.length; si++) {
+    const split = splits[si];
     const ranges = parseRanges(split.pages, total);
     const doc = await PDFDocument.create();
     for (const [s, e] of ranges) {
@@ -189,6 +220,7 @@ async function splitBySplits(file: File, splits: SplitPlan[]): Promise<SplitDown
     }
     const blob = pdfBlob(await doc.save());
     results.push({ fileName: `${split.name}.pdf`, label: split.label, url: URL.createObjectURL(blob) });
+    onProgress?.((si + 1) / splits.length * 100);
   }
   return results;
 }
@@ -222,6 +254,111 @@ async function parseScheduleText(file: File): Promise<{ email: string; pages: st
     if (m) recipients.push({ email: m[1].trim(), pages: m[2].trim() });
   }
   return recipients;
+}
+
+// ─── Cached pdfjs document (avoids reloading the PDF for every thumbnail) ────
+
+const _pdfCache = new WeakMap<File, Promise<any>>();
+function cachedPdfDoc(file: File) {
+  if (!_pdfCache.has(file)) {
+    _pdfCache.set(file, file.arrayBuffer().then(buf => pdfjsLib.getDocument({ data: buf }).promise));
+  }
+  return _pdfCache.get(file)!;
+}
+
+// ─── PageCanvas — renders one PDF page lazily when scrolled into view ─────────
+
+function PageCanvas({ file, pageNum, height = 80 }: { file: File; pageNum: number; height?: number }) {
+  const wrapRef   = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    let cancelled = false;
+    const obs = new IntersectionObserver(([entry]) => {
+      if (!entry.isIntersecting) return;
+      obs.disconnect();
+      (async () => {
+        try {
+          const pdf  = await cachedPdfDoc(file);
+          if (cancelled || !canvasRef.current) return;
+          const page = await pdf.getPage(Math.min(pageNum, pdf.numPages));
+          const nat  = page.getViewport({ scale: 1 });
+          const vp   = page.getViewport({ scale: height / nat.height });
+          const c    = canvasRef.current;
+          c.width    = vp.width; c.height = vp.height;
+          const ctx  = c.getContext('2d');
+          if (!ctx || cancelled) return;
+          await page.render({ canvasContext: ctx, viewport: vp }).promise;
+        } catch { /* ignore */ }
+      })();
+    }, { threshold: 0.05 });
+    obs.observe(el);
+    return () => { cancelled = true; obs.disconnect(); };
+  }, [file, pageNum, height]);
+
+  return (
+    <div ref={wrapRef} style={{ minHeight: height, background: '#0a0f1e', borderRadius: 6 }}>
+      <canvas ref={canvasRef} style={{ width: '100%', height: 'auto', display: 'block', borderRadius: 6 }} />
+    </div>
+  );
+}
+
+// ─── PageThumbnailStrip ───────────────────────────────────────────────────────
+
+function PageThumbnailStrip({ file, pageCount }: { file: File; pageCount: number }) {
+  return (
+    <div className="thumb-strip-wrap">
+      <span className="thumb-strip-label">Page reference — {pageCount} pages</span>
+      <div className="thumb-strip">
+        {Array.from({ length: pageCount }, (_, i) => (
+          <div key={i} className="thumb-item">
+            <div className="thumb-canvas-wrap">
+              <PageCanvas file={file} pageNum={i + 1} height={80} />
+            </div>
+            <span className="thumb-num">{i + 1}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── SplitPreviewPanel ────────────────────────────────────────────────────────
+
+function SplitPreviewPanel({ file, plans, totalPages }: {
+  file: File; plans: SplitPlan[]; totalPages: number;
+}) {
+  return (
+    <div className="glass-card">
+      <span className="sect-label">
+        Split preview — {plans.length} output PDF{plans.length !== 1 ? 's' : ''}
+      </span>
+      <div className="split-preview-grid">
+        {plans.map((plan, i) => {
+          let firstPage = 1, pgCount = 0;
+          try {
+            const ranges = parseRanges(plan.pages, totalPages);
+            firstPage = ranges[0][0];
+            pgCount   = ranges.reduce((s, [a, b]) => s + (b - a + 1), 0);
+          } catch { /* invalid */ }
+          return (
+            <div key={i} className="split-preview-card">
+              <div className="split-preview-thumb">
+                <PageCanvas file={file} pageNum={firstPage} height={90} />
+              </div>
+              <div className="split-preview-name" title={plan.label}>{plan.label}</div>
+              <div className="split-preview-meta">
+                <span className="split-preview-pages">{plan.pages}</span>
+                <span className="split-preview-count">{pgCount}p</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 // ─── PdfPagePreview ───────────────────────────────────────────────────────────
@@ -601,9 +738,10 @@ function SplitTab({
   const [zipLoading,  setZipLoading]  = useState(false);
 
   // selection + merge + email
-  const [selected,   setSelected]   = useState<Set<string>>(new Set());
-  const [mergeLoad,  setMergeLoad]  = useState(false);
-  const [emailDlg,   setEmailDlg]   = useState<SplitDownload[] | null>(null);
+  const [selected,      setSelected]      = useState<Set<string>>(new Set());
+  const [mergeLoad,     setMergeLoad]     = useState(false);
+  const [emailDlg,      setEmailDlg]      = useState<SplitDownload[] | null>(null);
+  const [splitProgress, setSplitProgress] = useState<number | null>(null);
 
   const baseName = pdfFile ? pdfFile.name.replace(/\.pdf$/i, '') : 'file';
   const defaultZip = `${baseName}_splits`;
@@ -635,23 +773,26 @@ function SplitTab({
   async function handleSplit() {
     if (!pdfFile) return;
     setSplitLoad(true); setSplitErr(''); setDownloads([]); setSelected(new Set());
+    setSplitProgress(0);
     try {
       let results: SplitDownload[];
+      const onProg = (pct: number) => setSplitProgress(pct);
       if (mode === 'individual') {
-        results = await splitIndividual(pdfFile, baseName);
+        results = await splitIndividual(pdfFile, baseName, onProg);
       } else {
         const splits: SplitPlan[] =
           mode === 'ranges'
             ? buildRangeSplits(rangeRows, baseName)
             : buildScheduleSplits(scheduleRecipients);
         if (!splits.length) { setSplitErr('Nothing to split.'); return; }
-        results = await splitBySplits(pdfFile, splits);
+        results = await splitBySplits(pdfFile, splits, onProg);
       }
       setDownloads(results);
     } catch (e) {
       setSplitErr(e instanceof Error ? e.message : 'Split failed.');
     } finally {
       setSplitLoad(false);
+      setSplitProgress(null);
     }
   }
 
@@ -744,6 +885,9 @@ function SplitTab({
               {rangeRows.filter((r) => r.pages.trim()).length !== 1 ? 's' : ''}
             </p>
           )}
+          {pdfFile && pageCount !== null && (
+            <PageThumbnailStrip file={pdfFile} pageCount={pageCount} />
+          )}
         </div>
       )}
 
@@ -774,12 +918,14 @@ function SplitTab({
               <span className="badge badge-green">{scheduleRecipients.length} recipients parsed</span>
               <div className="range-table" style={{ marginTop: 14 }}>
                 <div className="range-table-header">
+                  <span />
                   <span className="range-th">Email / Name</span>
                   <span className="range-th">Pages</span>
                   <span />
                 </div>
                 {scheduleRecipients.map((r, i) => (
                   <div key={i} className="range-table-row">
+                    <span />
                     <div className="recip-email-label">{r.email}</div>
                     <input
                       className="field-input"
@@ -801,6 +947,26 @@ function SplitTab({
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ── Split preview ── */}
+      {pdfFile && pageCount !== null && mode !== 'individual' && (() => {
+        const plans = mode === 'ranges'
+          ? buildRangeSplits(rangeRows, baseName)
+          : buildScheduleSplits(scheduleRecipients);
+        return plans.length > 0 ? (
+          <SplitPreviewPanel file={pdfFile} plans={plans} totalPages={pageCount} />
+        ) : null;
+      })()}
+
+      {/* ── Progress bar ── */}
+      {splitProgress !== null && (
+        <div className="split-progress-wrap">
+          <div className="split-progress-bar">
+            <div className="split-progress-fill" style={{ width: `${splitProgress}%` }} />
+          </div>
+          <div className="split-progress-label">{Math.round(splitProgress)}% complete</div>
         </div>
       )}
 
