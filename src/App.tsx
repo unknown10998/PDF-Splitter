@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import { PDFDocument } from 'pdf-lib';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import JSZip from 'jszip';
 import './App.css';
 
@@ -277,18 +276,25 @@ async function geminiConvertPdf(url: string, format: 'csv' | 'excel'): Promise<{
   const pdfBytes = await fetch(url).then(r => r.blob());
   const base64   = await blobToBase64(pdfBytes);
 
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+  const { GoogleGenAI } = await import('@google/genai');
+  const ai = new GoogleGenAI({ apiKey });
+  const result = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: [{
+      role: 'user',
+      parts: [
+        { inlineData: { mimeType: 'application/pdf', data: base64 } },
+        { text:
+          'Extract all data and tables from this PDF into CSV format. Use comma as the delimiter. ' +
+          'Properly quote fields that contain commas or newlines. ' +
+          'If there are multiple tables, separate them with a blank line. ' +
+          'Return only the raw CSV text — no markdown, no explanation.'
+        },
+      ],
+    }],
+  });
 
-  const result = await model.generateContent([
-    { inlineData: { mimeType: 'application/pdf', data: base64 } },
-    'Extract all data and tables from this PDF into CSV format. Use comma as the delimiter. ' +
-    'Properly quote fields that contain commas or newlines. ' +
-    'If there are multiple tables, separate them with a blank line. ' +
-    'Return only the raw CSV text — no markdown, no explanation.',
-  ]);
-
-  const csvText = result.response.text();
+  const csvText = result.text ?? '';
 
   if (format === 'csv') {
     return {
