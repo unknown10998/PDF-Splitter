@@ -14,11 +14,11 @@ type SplitMode = 'individual' | 'ranges' | 'schedule';
 type SplitPlan    = { name: string; pages: string; label: string };
 type SplitDownload = { fileName: string; label: string; url: string };
 type RangeRow      = { name: string; pages: string };
-type AppSettings  = { apiUrl: string; autoAdvance: boolean; geminiApiKey: string };
+type AppSettings  = { apiUrl: string; autoAdvance: boolean; pdfRestApiKey: string };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const DEFAULT_SETTINGS: AppSettings = { apiUrl: '', autoAdvance: true, geminiApiKey: '' };
+const DEFAULT_SETTINGS: AppSettings = { apiUrl: '', autoAdvance: true, pdfRestApiKey: '' };
 
 function loadSettings(): AppSettings {
   try {
@@ -258,60 +258,33 @@ async function parseScheduleText(file: File): Promise<{ email: string; pages: st
   return recipients;
 }
 
-// ─── Gemini PDF → CSV / Excel ─────────────────────────────────────────────────
+// ─── pdfREST PDF → Excel ──────────────────────────────────────────────────────
 
-async function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve((reader.result as string).split(',')[1]);
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
-}
+async function pdfRestConvertToExcel(url: string, settingsKey?: string): Promise<{ blob: Blob; fileName: string }> {
+  const apiKey = settingsKey?.trim() || process.env.REACT_APP_PDFREST_API_KEY || '';
+  if (!apiKey) throw new Error('pdfREST API key not set. Add it in Settings → pdfREST API Key.');
 
-async function geminiConvertPdf(url: string, format: 'csv' | 'excel', settingsKey?: string): Promise<{ blob: Blob; fileName: string }> {
-  const apiKey = settingsKey?.trim() || process.env.REACT_APP_GEMINI_API_KEY || '';
-  if (!apiKey || apiKey === 'your_gemini_api_key_here') {
-    throw new Error('Gemini API key not set. Add it in Settings → Gemini API Key.');
-  }
+  const pdfBlob = await fetch(url).then(r => r.blob());
+  const form = new FormData();
+  form.append('file', pdfBlob, 'document.pdf');
+  form.append('output', 'pdfrest_excel_pdf');
 
-  const pdfBytes = await fetch(url).then(r => r.blob());
-  const base64   = await blobToBase64(pdfBytes);
-
-  const { GoogleGenAI } = await import('@google/genai');
-  const ai = new GoogleGenAI({ apiKey });
-  const result = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: [{
-      role: 'user',
-      parts: [
-        { inlineData: { mimeType: 'application/pdf', data: base64 } },
-        { text:
-          'Extract all data and tables from this PDF into CSV format. Use comma as the delimiter. ' +
-          'Properly quote fields that contain commas or newlines. ' +
-          'If there are multiple tables, separate them with a blank line. ' +
-          'Return only the raw CSV text — no markdown, no explanation.'
-        },
-      ],
-    }],
+  const resp = await fetch('https://api.pdfrest.com/excel', {
+    method: 'POST',
+    headers: { 'Api-Key': apiKey },
+    body: form,
   });
 
-  const csvText = result.text ?? '';
+  const json = await resp.json();
+  if (!resp.ok) throw new Error(`pdfREST error ${resp.status}: ${json.message ?? JSON.stringify(json)}`);
 
-  if (format === 'csv') {
-    return {
-      blob: new Blob([csvText], { type: 'text/csv' }),
-      fileName: 'data.csv',
-    };
-  }
+  const outputUrl: string = json.outputUrl;
+  if (!outputUrl) throw new Error(`Unexpected response: ${JSON.stringify(json)}`);
 
-  const XLSX = await import('xlsx');
-  const wb   = XLSX.read(csvText, { type: 'string' });
-  const buf  = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
-  return {
-    blob: new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
-    fileName: 'data.xlsx',
-  };
+  const fileResp = await fetch(outputUrl);
+  const blob = await fileResp.blob();
+  const name = (json.output_info?.[0]?.output_filename as string | undefined) ?? 'output.xlsx';
+  return { blob, fileName: name };
 }
 
 // ─── Cached pdfjs document (avoids reloading the PDF for every thumbnail) ────
@@ -770,25 +743,23 @@ function EmailDialog({ files, onClose }: { files: SplitDownload[]; onClose: () =
   );
 }
 
-// ─── GeminiConvertDialog ──────────────────────────────────────────────────────
+// ─── PdfRestConvertDialog ─────────────────────────────────────────────────────
 
-function GeminiConvertDialog({ download, apiKey, onClose }: { download: SplitDownload; apiKey: string; onClose: () => void }) {
+function PdfRestConvertDialog({ download, apiKey, onClose }: { download: SplitDownload; apiKey: string; onClose: () => void }) {
   const [loading, setLoading] = useState(false);
   const [error,   setError]   = useState('');
 
-  async function convert(format: 'csv' | 'excel') {
+  async function convert() {
     setLoading(true); setError('');
     try {
       const baseName = download.fileName.replace(/\.pdf$/i, '');
-      const { blob, fileName } = await geminiConvertPdf(download.url, format, apiKey);
-      const ext = format === 'csv' ? '.csv' : '.xlsx';
+      const { blob } = await pdfRestConvertToExcel(download.url, apiKey);
       const obj = URL.createObjectURL(blob);
       const a   = document.createElement('a');
       a.href = obj;
-      a.download = `${baseName}${ext}`;
+      a.download = `${baseName}.xlsx`;
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(obj), 1000);
-      void fileName;
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Conversion failed.');
@@ -800,21 +771,18 @@ function GeminiConvertDialog({ download, apiKey, onClose }: { download: SplitDow
   return (
     <div className="dlg-overlay" onClick={() => !loading && onClose()}>
       <div className="dlg" onClick={e => e.stopPropagation()}>
-        <h3 className="dlg-title">Convert with Gemini AI</h3>
+        <h3 className="dlg-title">Convert to Excel</h3>
         <p className="dlg-desc">
-          Gemini will read <strong style={{ color: '#e2e8f0' }}>{download.fileName}</strong> and extract
-          its data into a spreadsheet. Choose your format:
+          pdfREST will convert <strong style={{ color: '#e2e8f0' }}>{download.fileName}</strong> to
+          an Excel spreadsheet (.xlsx).
         </p>
         {error && <div className="alert alert-error">{error}</div>}
         <div className="dlg-actions">
           <button className="btn btn-ghost btn-sm" type="button" disabled={loading} onClick={onClose}>
             Cancel
           </button>
-          <button className="btn btn-ghost btn-sm" type="button" disabled={loading} onClick={() => convert('csv')}>
-            {loading ? <><span className="spinner" /> Working…</> : '⬇ CSV'}
-          </button>
-          <button className="btn btn-primary btn-sm" type="button" disabled={loading} onClick={() => convert('excel')}>
-            {loading ? <><span className="spinner" /> Working…</> : '⬇ Excel'}
+          <button className="btn btn-primary btn-sm" type="button" disabled={loading} onClick={convert}>
+            {loading ? <><span className="spinner" /> Converting…</> : '⬇ Download Excel'}
           </button>
         </div>
       </div>
@@ -825,10 +793,10 @@ function GeminiConvertDialog({ download, apiKey, onClose }: { download: SplitDow
 // ─── SplitTab ────────────────────────────────────────────────────────────────
 
 function SplitTab({
-  pdfFile, pageCount, onBack, geminiApiKey,
+  pdfFile, pageCount, onBack, pdfRestApiKey,
 }: {
   pdfFile: File | null; pageCount: number | null;
-  onBack: () => void; geminiApiKey: string;
+  onBack: () => void; pdfRestApiKey: string;
 }) {
   const [mode, setMode]             = useState<SplitMode>('individual');
   const [rangeRows, setRangeRows]   = useState<RangeRow[]>([{ name: '', pages: '' }]);
@@ -1178,7 +1146,7 @@ function SplitTab({
       {emailDlg && <EmailDialog files={emailDlg} onClose={() => setEmailDlg(null)} />}
 
       {/* ── Gemini convert dialog ── */}
-      {geminiDlg && <GeminiConvertDialog download={geminiDlg} apiKey={geminiApiKey} onClose={() => setGeminiDlg(null)} />}
+      {geminiDlg && <PdfRestConvertDialog download={geminiDlg} apiKey={pdfRestApiKey} onClose={() => setGeminiDlg(null)} />}
 
       {/* ── Batch fill dialog ── */}
       {showBatchFill && (
@@ -1236,13 +1204,13 @@ function SettingsTab({ settings, onChange }: { settings: AppSettings; onChange: 
         <span className="sect-group-label">AI</span>
         <div className="settings-row">
           <div>
-            <p className="settings-label">Gemini API Key</p>
-            <p className="settings-desc">Used for the ✦ CSV/Excel conversion on download cards. Overrides the <code>.env</code> key.</p>
+            <p className="settings-label">pdfREST API Key</p>
+            <p className="settings-desc">Used for the ✦ Convert to Excel button on download cards. Get a free key at pdfrest.com.</p>
           </div>
           <input
             className="field-input" style={{ width: 270 }} type="password"
-            value={settings.geminiApiKey} onChange={(e) => set('geminiApiKey', e.target.value)}
-            placeholder="Paste your Gemini API key"
+            value={settings.pdfRestApiKey} onChange={(e) => set('pdfRestApiKey', e.target.value)}
+            placeholder="Paste your pdfREST API key"
           />
         </div>
 
@@ -1331,7 +1299,7 @@ export default function App() {
         <SplitTab
           pdfFile={pdfFile} pageCount={pageCount}
           onBack={() => setActiveTab('upload')}
-          geminiApiKey={settings.geminiApiKey}
+          pdfRestApiKey={settings.pdfRestApiKey}
         />
       )}
       {activeTab === 'settings' && (
