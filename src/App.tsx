@@ -278,7 +278,7 @@ async function geminiConvertPdf(url: string, format: 'csv' | 'excel'): Promise<{
   const base64   = await blobToBase64(pdfBytes);
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
   const result = await model.generateContent([
     { inlineData: { mimeType: 'application/pdf', data: base64 } },
