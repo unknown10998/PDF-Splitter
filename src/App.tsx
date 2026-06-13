@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import { PDFDocument } from 'pdf-lib';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import JSZip from 'jszip';
 import './App.css';
 
@@ -33,7 +34,7 @@ function saveSettings(s: AppSettings) {
 }
 
 function sanitizeName(s: string) {
-  return s.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/^_+|_+$/g, '') || 'file';
+  return s.replace(/[^a-zA-Z0-9 ._-]/g, '').replace(/^\s+|\s+$/g, '') || 'file';
 }
 
 function buildRangeSplits(rows: RangeRow[], baseName: string): SplitPlan[] {
@@ -254,6 +255,55 @@ async function parseScheduleText(file: File): Promise<{ email: string; pages: st
     if (m) recipients.push({ email: m[1].trim(), pages: m[2].trim() });
   }
   return recipients;
+}
+
+// ─── Gemini PDF → CSV / Excel ─────────────────────────────────────────────────
+
+async function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve((reader.result as string).split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function geminiConvertPdf(url: string, format: 'csv' | 'excel'): Promise<{ blob: Blob; fileName: string }> {
+  const apiKey = process.env.REACT_APP_GEMINI_API_KEY;
+  if (!apiKey || apiKey === 'your_gemini_api_key_here') {
+    throw new Error('Gemini API key not set. Open .env and replace the placeholder with your key, then restart the app.');
+  }
+
+  const pdfBytes = await fetch(url).then(r => r.blob());
+  const base64   = await blobToBase64(pdfBytes);
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+  const result = await model.generateContent([
+    { inlineData: { mimeType: 'application/pdf', data: base64 } },
+    'Extract all data and tables from this PDF into CSV format. Use comma as the delimiter. ' +
+    'Properly quote fields that contain commas or newlines. ' +
+    'If there are multiple tables, separate them with a blank line. ' +
+    'Return only the raw CSV text — no markdown, no explanation.',
+  ]);
+
+  const csvText = result.response.text();
+
+  if (format === 'csv') {
+    return {
+      blob: new Blob([csvText], { type: 'text/csv' }),
+      fileName: 'data.csv',
+    };
+  }
+
+  const XLSX = await import('xlsx');
+  const wb   = XLSX.read(csvText, { type: 'string' });
+  const buf  = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+  return {
+    blob: new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+    fileName: 'data.xlsx',
+  };
 }
 
 // ─── Cached pdfjs document (avoids reloading the PDF for every thumbnail) ────
@@ -712,6 +762,58 @@ function EmailDialog({ files, onClose }: { files: SplitDownload[]; onClose: () =
   );
 }
 
+// ─── GeminiConvertDialog ──────────────────────────────────────────────────────
+
+function GeminiConvertDialog({ download, onClose }: { download: SplitDownload; onClose: () => void }) {
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState('');
+
+  async function convert(format: 'csv' | 'excel') {
+    setLoading(true); setError('');
+    try {
+      const baseName = download.fileName.replace(/\.pdf$/i, '');
+      const { blob, fileName } = await geminiConvertPdf(download.url, format);
+      const ext = format === 'csv' ? '.csv' : '.xlsx';
+      const obj = URL.createObjectURL(blob);
+      const a   = document.createElement('a');
+      a.href = obj;
+      a.download = `${baseName}${ext}`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(obj), 1000);
+      void fileName;
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Conversion failed.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="dlg-overlay" onClick={() => !loading && onClose()}>
+      <div className="dlg" onClick={e => e.stopPropagation()}>
+        <h3 className="dlg-title">Convert with Gemini AI</h3>
+        <p className="dlg-desc">
+          Gemini will read <strong style={{ color: '#e2e8f0' }}>{download.fileName}</strong> and extract
+          its data into a spreadsheet. Choose your format:
+        </p>
+        {error && <div className="alert alert-error">{error}</div>}
+        <div className="dlg-actions">
+          <button className="btn btn-ghost btn-sm" type="button" disabled={loading} onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn btn-ghost btn-sm" type="button" disabled={loading} onClick={() => convert('csv')}>
+            {loading ? <><span className="spinner" /> Working…</> : '⬇ CSV'}
+          </button>
+          <button className="btn btn-primary btn-sm" type="button" disabled={loading} onClick={() => convert('excel')}>
+            {loading ? <><span className="spinner" /> Working…</> : '⬇ Excel'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── SplitTab ────────────────────────────────────────────────────────────────
 
 function SplitTab({
@@ -741,6 +843,7 @@ function SplitTab({
   const [selected,      setSelected]      = useState<Set<string>>(new Set());
   const [mergeLoad,     setMergeLoad]     = useState(false);
   const [emailDlg,      setEmailDlg]      = useState<SplitDownload[] | null>(null);
+  const [geminiDlg,     setGeminiDlg]     = useState<SplitDownload | null>(null);
   const [splitProgress, setSplitProgress] = useState<number | null>(null);
 
   const baseName = pdfFile ? pdfFile.name.replace(/\.pdf$/i, '') : 'file';
@@ -1040,6 +1143,10 @@ function SplitTab({
                       className="dl-act-btn" type="button" title="Email via Outlook"
                       onClick={(e) => { e.stopPropagation(); setEmailDlg([d]); }}
                     >✉</button>
+                    <button
+                      className="dl-act-btn" type="button" title="Convert to CSV / Excel with Gemini"
+                      onClick={(e) => { e.stopPropagation(); setGeminiDlg(d); }}
+                    >✦</button>
                   </div>
                 </div>
               );
@@ -1061,6 +1168,9 @@ function SplitTab({
 
       {/* ── Email dialog ── */}
       {emailDlg && <EmailDialog files={emailDlg} onClose={() => setEmailDlg(null)} />}
+
+      {/* ── Gemini convert dialog ── */}
+      {geminiDlg && <GeminiConvertDialog download={geminiDlg} onClose={() => setGeminiDlg(null)} />}
 
       {/* ── Batch fill dialog ── */}
       {showBatchFill && (
